@@ -1,0 +1,14 @@
+{
+  "miniapp": {
+    "version": "1",
+    "name": "Creator Marketplace Eligibility",
+    "description": "Check if a Farcaster account is eligible for the Creator Marketplace using Neynar score and FID.",
+    "homeUrl": "https://<YOUR_DEPLOY_DOMAIN>",
+    "iconUrl": "https://<YOUR_DEPLOY_DOMAIN>/icon.png"
+  },
+  "accountAssociation": {
+    "header": "<PASTE_ACCOUNT_ASSOC_HEADER_FROM_DEV_TOOLS>",
+    "payload": "<PASTE_ACCOUNT_ASSOC_PAYLOAD_FROM_DEV_TOOLS>",
+    "signature": "<PASTE_ACCOUNT_ASSOC_SIGNATURE_FROM_DEV_TOOLS>"
+  }
+}
