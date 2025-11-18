@@ -19,23 +19,40 @@ export default async function handler(req, res) {
     const isNumeric = /^\d+$/.test(input);
 
     const baseClean = base.replace(/\/$/, "");
-    const url = isNumeric
-      ? `${baseClean}/users/${encodeURIComponent(input)}`
-      : `${baseClean}/users/lookup?handle=${encodeURIComponent(input)}`;
+    // Some Neynar endpoints expect a "lookup" path while others accept /users
+    // We'll POST JSON bodies (safer when API requires POST).
+    const endpoint = isNumeric
+      ? `${baseClean}/users/${encodeURIComponent(input)}` // may accept GET, but we'll POST too (no body)
+      : `${baseClean}/users/lookup`;
 
-    const r = await fetch(url, {
-      headers: {
-        "Content-Type": "application/json",
-        ...(key ? { "Authorization": `Bearer ${key}` } : {}),
-      },
+    // Build headers. Include both Authorization and x-api-key if key present.
+    const headers = {
+      "Content-Type": "application/json",
+      ...(key ? { Authorization: `Bearer ${key}`, "x-api-key": key } : {}),
+    };
+
+    // Create POST body depending on lookup vs numeric
+    const bodyPayload = isNumeric ? undefined : { handle: input }; // lookup expects handle
+    // If numeric endpoint requires a body, adjust as needed; using undefined will result in an empty POST.
+
+    const r = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: bodyPayload ? JSON.stringify(bodyPayload) : undefined,
     });
 
+    const text = await r.text(); // always read body text for debug
+    // Helpful: log it server-side (will appear in Vercel logs).
     if (!r.ok) {
-      const text = await r.text();
-      return res.status(r.status).json({ error: "neynar_error", status: r.status, message: text });
+      console.error("Neynar error:", r.status, text);
+      // Try to parse JSON error if possible
+      let parsed = text;
+      try { parsed = JSON.parse(text); } catch (e) { /* keep text */ }
+      return res.status(r.status).json({ error: "neynar_error", status: r.status, message: parsed });
     }
 
-    const data = await r.json();
+    // success: parse JSON
+    const data = text ? JSON.parse(text) : {};
     const neynar_score = data?.neynar_score ?? data?.score ?? null;
     const fid = data?.fid ?? data?.id ?? (isNumeric ? input : null);
 
