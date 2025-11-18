@@ -1,75 +1,124 @@
-/**
- * POST body: { query: "@alice" } or { query: "12345" }
- *
- * Environment variables required:
- *   NEYNAR_BASE_URL   - e.g. "https://api.neynar.example" (set to the Neynar base URL)
- *   NEYNAR_API_KEY    - your Neynar API key (if required)
- *
- * NOTE: Replace the placeholder endpoint paths below with the actual Neynar endpoints you will use.
- */
-
-function jsonResponse(res, status, body) {
-  res.status(status).json(body);
-}
+// pages/api/check.js
+// Accepts GET ?q=handleOrFid (for quick tests) and POST { q: "<handle_or_fid>" }.
+// Uses NEYNAR_BASE_URL and NEYNAR_API_KEY env vars.
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") return jsonResponse(res, 405, { message: "Only POST allowed" });
-
-  const { query } = req.body || {};
-  if (!query) return jsonResponse(res, 400, { message: "Missing query in body" });
-
-  let fid;
   try {
-    // If input looks like a handle (starts with @), resolve via Neynar or Farcaster lookup
-    if (String(query).trim().startsWith("@")) {
-      const handle = String(query).trim().replace(/^@/, "");
-      // --- PLACEHOLDER: lookup by handle ---
-      // Replace the path "/users/lookup" with the actual Neynar or Farcaster endpoint for user lookup.
-      const lookupUrl = `${process.env.NEYNAR_BASE_URL}/users/lookup?handle=${encodeURIComponent(handle)}`;
-      const r = await fetch(lookupUrl, {
-        headers: { "Authorization": `Bearer ${process.env.NEYNAR_API_KEY}` }
+    // Accept both GET (query) and POST (body)
+    const q = (req.method === "POST" ? req.body?.q : req.query?.q) || "";
+    
+    if (!q) {
+      return res.status(400).json({ 
+        error: "missing_parameter", 
+        message: "Missing query parameter 'q'. Please provide a Farcaster handle or FID." 
       });
-      if (!r.ok) {
-        const text = await r.text();
-        throw new Error(`Lookup failed: ${r.status} ${text}`);
-      }
-      const j = await r.json();
-      fid = j.fid ?? j.data?.fid;
-      if (!fid) throw new Error("Lookup did not return fid");
-    } else {
-      // parse numeric FID
-      const n = Number(String(query).trim());
-      if (!Number.isInteger(n) || n < 0) return jsonResponse(res, 400, { message: "Invalid numeric FID" });
-      fid = n;
     }
 
-    // --- Fetch Neynar score for the FID ---
-    // Replace "/metrics/fid" below with real Neynar endpoint path.
-    const scoreUrl = `${process.env.NEYNAR_BASE_URL}/metrics/fid/${encodeURIComponent(fid)}`;
-    const r2 = await fetch(scoreUrl, {
-      headers: { "Authorization": `Bearer ${process.env.NEYNAR_API_KEY}`, "Accept": "application/json" }
+    const base = process.env.NEYNAR_BASE_URL;
+    const key = process.env.NEYNAR_API_KEY ?? "";
+
+    if (!base) {
+      console.error("NEYNAR_BASE_URL not configured");
+      return res.status(500).json({ 
+        error: "server_configuration", 
+        message: "Server is not properly configured. Please contact the administrator." 
+      });
+    }
+
+    if (!key) {
+      console.error("NEYNAR_API_KEY not configured");
+      return res.status(500).json({ 
+        error: "server_configuration", 
+        message: "API key is not configured. Please contact the administrator." 
+      });
+    }
+
+    const input = q.toString().trim().replace(/^@+/, "");
+    const isNumeric = /^\d+$/.test(input);
+    const baseClean = base.replace(/\/$/, "");
+
+    // Construct endpoint based on input type
+    const endpoint = isNumeric
+      ? `${baseClean}/farcaster/user/bulk?fids=${encodeURIComponent(input)}`
+      : `${baseClean}/farcaster/user/by_username?username=${encodeURIComponent(input)}`;
+
+    // Build headers
+    const headers = {
+      "accept": "application/json",
+      "x-api-key": key,
+    };
+
+    console.log(`Fetching from Neynar: ${endpoint}`);
+
+    const r = await fetch(endpoint, {
+      method: "GET",
+      headers,
     });
-    if (!r2.ok) {
-      const text = await r2.text();
-      throw new Error(`Neynar metrics failed: ${r2.status} ${text}`);
+
+    const text = await r.text();
+
+    // Log errors for debugging
+    if (!r.ok) {
+      console.error(`Neynar API error: ${r.status} ${r.statusText}`);
+      console.error(`Response body: ${text}`);
+      
+      let parsed;
+      try { 
+        parsed = JSON.parse(text); 
+      } catch (e) { 
+        parsed = { message: text };
+      }
+
+      // Return the error with proper status code
+      return res.status(r.status).json({ 
+        error: "neynar_error", 
+        status: r.status, 
+        message: parsed 
+      });
     }
-    const scoreJson = await r2.json();
-    // Expect response to include numeric field `neynar_score`
-    const neynar_score = parseFloat(scoreJson.neynar_score ?? scoreJson.score ?? scoreJson.data?.neynar_score);
-    if (Number.isNaN(neynar_score)) throw new Error("Neynar response missing neynar_score");
 
-    // --- Apply your rule ---
-    const eligible = (neynar_score > 0.7) && (fid < 500000);
+    // Success: parse JSON
+    const data = text ? JSON.parse(text) : {};
+    
+    // Handle bulk response (numeric FID)
+    let user;
+    if (isNumeric && data.users && data.users.length > 0) {
+      user = data.users[0];
+    } else if (!isNumeric && data.user) {
+      user = data.user;
+    } else {
+      return res.status(404).json({
+        error: "user_not_found",
+        message: "User not found on Farcaster"
+      });
+    }
 
-    const reasons = [];
-    if (!(neynar_score > 0.7)) reasons.push("Neynar score is <= 0.70");
-    if (!(fid < 500000)) reasons.push("FID is >= 500000");
+    const neynar_score = user?.experimental?.neynar_user_score ?? user?.neynar_score ?? null;
+    const fid = user?.fid ?? (isNumeric ? parseInt(input) : null);
 
-    return jsonResponse(res, 200, { fid, neynar_score, eligible, reasons });
+    const eligible =
+      (typeof neynar_score === "number" && neynar_score > 0.7) &&
+      (fid !== null && !isNaN(Number(fid)) && Number(fid) < 500000);
+
+    return res.status(200).json({
+      ok: true,
+      input,
+      user: {
+        fid: user.fid,
+        username: user.username,
+        display_name: user.display_name,
+        pfp_url: user.pfp_url
+      },
+      neynar_score,
+      fid,
+      eligible,
+    });
 
   } catch (err) {
-    console.error("API /api/check error:", err);
-    return jsonResponse(res, 500, { message: err.message || String(err) });
+    console.error("/api/check error:", err);
+    return res.status(500).json({ 
+      error: "internal_error", 
+      message: err.message || String(err) 
+    });
   }
 }
-
